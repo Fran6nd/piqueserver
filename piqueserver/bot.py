@@ -621,7 +621,14 @@ class BotManagerMixin:
                 bot.think(UPDATE_FREQUENCY)
 
     def on_map_change(self, map_) -> None:
-        """Remove all bots before the map changes so scripts can re-create them."""
+        """
+        Remove all bots before the map changes so scripts can re-create them.
+
+        Bots are disconnected **before** ``super()`` is called so that
+        ``set_map()`` does not find them in ``self.connections`` and attempt
+        to call ``reset()`` / ``send_map()`` on them (which would destroy
+        their state before we have a chance to clean up properly).
+        """
         for bot in list(self.bots):
             bot.remove()
         self.bots.clear()
