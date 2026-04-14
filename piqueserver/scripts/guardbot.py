@@ -121,18 +121,19 @@ class GuardBot(Bot):
             self._low_hp_warned = True
             self.chat(f'{conn.name} is taking heavy fire!', global_message=False)
 
-        enemies = self.get_enemies()
-        if not enemies:
-            self.set_walk()  # stop
+        # Only consider enemies we can actually see
+        visible = [e for e in self.get_enemies() if self.can_see(e)]
+        if not visible:
+            self.set_walk()  # no visible target — hold position
             return
 
-        target = self.closest(enemies)
+        target = self.closest(visible)
         dist = self.distance_to(target)
 
         self.look_toward(target)
 
-        if self.can_see(target) and dist <= self._shoot_range:
-            # In sight and in range — stand still and engage
+        if dist <= self._shoot_range:
+            # In range — stand still and engage
             self.set_walk()
 
             # Grenade when enemy is very close
@@ -147,7 +148,7 @@ class GuardBot(Bot):
                 self._shoot_cooldown = conn.weapon_object.delay
 
         else:
-            # Walk toward the target using the physics engine
+            # Visible but out of shoot range — close the distance
             self._walk_toward(target)
 
     # ------------------------------------------------------------------
