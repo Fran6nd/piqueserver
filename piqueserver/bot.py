@@ -206,9 +206,16 @@ class Bot:
             Block-placement color as an ``(R, G, B)`` tuple.
         """
         peer = FakePeer()
-        # ServerConnection.__init__ reads peer.address.{host, port} to set
-        # self.address — FakePeer.address satisfies this requirement.
-        conn = BotConnection(protocol, peer)
+        # Dynamically build a connection class that combines:
+        #   BotConnection  — no-op send_contained / loader_received / disconnect
+        #   protocol.connection_class — the fully script-stacked connection class
+        #
+        # BotConnection comes first in the MRO so its overrides take precedence,
+        # but the stacked class's __init__ chain runs (old-style scripts call the
+        # wrapped class's __init__ directly), ensuring every script-added attribute
+        # (ratio_kills, squad_pref, …) is initialised on the bot instance.
+        DynBotConn = type('BotConnection', (BotConnection, protocol.connection_class), {})
+        conn = DynBotConn(protocol, peer)
         conn.player_id = protocol.player_ids.pop()
         conn.name = protocol.get_name(name)
         conn.color = color
