@@ -182,8 +182,17 @@ class GuardBot(Bot):
 def apply_script(protocol, connection, config):
     class GuardBotProtocol(BotManagerMixin, protocol):
         def on_map_change(self, map_):
-            # BotManagerMixin.on_map_change removes old bots, then calls super
+            # BotManagerMixin.on_map_change removes old bots before calling super.
+            # super() triggers set_map() which clears self.players and resets all
+            # connections after on_map_change returns, so bots cannot be created
+            # inline here — they would be wiped immediately.
+            # reactor.callLater(0, ...) defers creation to the next event loop
+            # iteration, after set_map() has fully completed.
             super().on_map_change(map_)
+            from twisted.internet import reactor
+            reactor.callLater(0, self._spawn_guards)
+
+        def _spawn_guards(self):
             weapon = _WEAPONS.get(_weapon_opt.get(), RIFLE_WEAPON)
             self.add_bot(
                 GuardBot.create(self, 'Guard-Blue', self.team_1, weapon)
