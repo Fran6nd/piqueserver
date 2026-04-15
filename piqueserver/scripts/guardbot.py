@@ -179,7 +179,10 @@ class GuardBot(Bot):
         Each phase lasts ``_UNSTICK_PHASE_DURATION`` seconds before cycling.
         The cycle continues until the position check shows forward progress.
         """
-        self.look_toward(target)
+        # Use horizontal orientation so p->f.x/p->f.y are at full magnitude.
+        # A pitched view (enemy above/below) reduces those components, making
+        # mf=True produce little horizontal thrust and jump appear in-place.
+        self.look_horizontal_toward(target)
 
         # --- Position check ---
         pos = self.position

@@ -319,6 +319,35 @@ class Bot:
             return
         conn.world_object.set_orientation(dx / length, dy / length, dz / length)
 
+    def look_horizontal_toward(
+        self, target: Union[object, Tuple[float, float, float]]
+    ) -> None:
+        """
+        Orient the bot toward ``target`` using only the horizontal (XY) plane.
+
+        AoS forward movement adds ``p->f.x`` and ``p->f.y`` to velocity.
+        When the bot looks steeply up or down (pitched view), those components
+        shrink toward zero and ``mf=True`` produces little horizontal thrust —
+        the bot jumps in place.  This method zeroes the Z component so the
+        full orientation magnitude is horizontal, giving maximum forward speed.
+
+        Use this when walking toward a target.  Use ``look_toward`` when
+        aiming to shoot (where vertical accuracy matters).
+        """
+        conn = self.connection
+        if conn.world_object is None:
+            return
+        if hasattr(target, 'world_object') and target.world_object is not None:
+            tx, ty, _ = target.world_object.position.get()
+        else:
+            tx, ty, _ = target
+        bx, by, _ = conn.world_object.position.get()
+        dx, dy = tx - bx, ty - by
+        length = math.sqrt(dx * dx + dy * dy)
+        if length < 0.001:
+            return
+        conn.world_object.set_orientation(dx / length, dy / length, 0.0)
+
     def set_walk(
         self,
         up: bool = False,
