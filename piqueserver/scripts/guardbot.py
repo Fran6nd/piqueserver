@@ -99,7 +99,7 @@ class GuardBot(Bot):
     # Stuck-detection tunables
     _STUCK_CHECK_INTERVAL: float = 0.5   # seconds between position checks
     _STUCK_THRESHOLD: float = 0.8        # min blocks moved to be considered un-stuck
-    _UNSTICK_PHASE_DURATION: float = 0.4 # seconds spent in each unstick phase
+    _UNSTICK_JUMP_INTERVAL: float = 0.5  # min seconds between jump retries when stuck
 
     def __init_bot__(self) -> None:
         self._shoot_range = float(_shoot_range_opt.get())
@@ -172,11 +172,14 @@ class GuardBot(Bot):
         has moved horizontally.  If it moved less than ``_STUCK_THRESHOLD``
         blocks it is considered stuck and enters a recovery loop:
 
-        * Phase 0 — jump while sprinting forward (clears 1-block ledges)
-        * Phase 1 — crouch while sprinting forward (lowers hitbox)
+        When stuck, every ``_UNSTICK_JUMP_INTERVAL`` seconds the bot checks
+        whether there is a solid block directly above it:
 
-        Each phase lasts ``_UNSTICK_PHASE_DURATION`` seconds before cycling.
-        The cycle continues until the position check shows forward progress.
+        * No block above → jump (clear a 2-block ledge)
+        * Block above    → crouch (squeeze through a low gap; jumping would
+          just hit the ceiling)
+
+        The check repeats each interval until the position check shows progress.
         """
         # Use horizontal orientation so p->f.x/p->f.y are at full magnitude.
         # A pitched view (enemy above/below) reduces those components, making
@@ -207,33 +210,47 @@ class GuardBot(Bot):
                 self._pos_check_timer = 0.0
                 self._pos_at_check = pos
 
-        # --- Unstick phase ---
+        # --- Unstick ---
+        # _unstick_phase == 0: jumping  (no block above)
+        # _unstick_phase == 1: crouching (block above — jump would hit ceiling)
         jump = False
         crouch = False
         if self._unstick_phase >= 0:
             self._unstick_timer += dt
-            if self._unstick_phase == 0:
-                # Jump phase: advance to crouch only after the bot has landed
-                # AND the minimum phase duration has elapsed.  This prevents
-                # crouching while still airborne from the jump.
-                wo = self.connection.world_object
-                landed = wo is not None and not wo.airborne
-                if self._unstick_timer >= self._UNSTICK_PHASE_DURATION and landed:
-                    self._unstick_phase = 1
-                    self._unstick_timer = 0.0
-            else:
-                # Crouch phase: purely time-based
-                if self._unstick_timer >= self._UNSTICK_PHASE_DURATION:
-                    self._unstick_phase = 0
-                    self._unstick_timer = 0.0
-                    self._fire_jump = True  # one-shot jump on re-entry
+            wo = self.connection.world_object
+            grounded = wo is not None and not wo.airborne
+            if grounded and self._unstick_timer >= self._UNSTICK_JUMP_INTERVAL:
+                self._unstick_timer = 0.0
+                if self._has_block_above():
+                    self._unstick_phase = 1  # blocked above — crouch
+                else:
+                    self._unstick_phase = 0  # clear above — jump
+                    self._fire_jump = True
 
-            # Consume the pending jump flag exactly once
+            # Hold crouch continuously while in crouch mode
+            if self._unstick_phase == 1:
+                crouch = True
+
             jump = self._fire_jump
             self._fire_jump = False
-            crouch = self._unstick_phase == 1
 
         self.set_walk(up=True, sprint=True, jump=jump, crouch=crouch)
+
+    def _has_block_above(self) -> bool:
+        """
+        True if there is a solid block close above the bot.
+
+        In AoS, Z increases downward (z=0 is the sky).  The player reference
+        point p->p.z sits roughly at waist height; the head reaches ~z-1.35.
+        Checking z-1 and z-2 (one and two blocks above the reference point)
+        reliably detects a ceiling that would prevent an effective jump.
+        """
+        pos = self.position
+        if pos is None:
+            return False
+        x, y, z = int(pos[0]), int(pos[1]), int(pos[2])
+        map_ = self.protocol.map
+        return map_.get_solid(x, y, z - 1) or map_.get_solid(x, y, z - 2)
 
     def _roam(self, dt: float) -> None:
         """Walk toward the enemy tent when there is nothing to shoot."""
