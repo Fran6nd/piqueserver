@@ -167,6 +167,7 @@ class Bot:
 
     connection: BotConnection
     protocol: object  # ServerProtocol at runtime
+    _walk_state: Optional[tuple]  # last InputData state sent to clients
 
     # ------------------------------------------------------------------
     # Factory
@@ -238,7 +239,7 @@ class Bot:
 
     def __init_bot__(self) -> None:
         """Called after the connection is fully set up.  Override for custom init."""
-        pass
+        self._walk_state = None  # None forces broadcast on first set_walk call
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -343,8 +344,19 @@ class Bot:
         conn = self.connection
         if conn.world_object is None or not conn.hp:
             return
+        new_state = (up, down, left, right, jump, crouch, sneak, sprint)
         conn.world_object.set_walk(up, down, left, right)
         conn.world_object.set_animation(jump, crouch, sneak, sprint)
+
+        if new_state == self._walk_state:
+            # State unchanged — physics already has the correct flags,
+            # no need to re-send InputData to clients.
+            return
+
+        # jump is one-shot: the C physics engine clears player.jump after one
+        # tick (world_c.cpp move_player), so store the post-consume state so
+        # a subsequent set_walk(up=True) call is not suppressed as "no change".
+        self._walk_state = (up, down, left, right, False, crouch, sneak, sprint)
 
         inp = loaders.InputData()
         inp.player_id = conn.player_id
@@ -625,6 +637,11 @@ class BotManagerMixin:
         # Iterate over a snapshot so remove_bot() calls inside think() are safe
         for bot in list(self.bots):
             if not bot.connection.disconnected:
+                # When the bot is dead, clear the cached walk state so the
+                # first set_walk() after respawn always re-broadcasts InputData
+                # to clients (physics resets all flags on spawn).
+                if not bot.connection.hp:
+                    bot._walk_state = None
                 bot.think(UPDATE_FREQUENCY)
 
     def on_map_change(self, map_) -> None:
