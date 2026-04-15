@@ -212,11 +212,21 @@ class GuardBot(Bot):
         crouch = False
         if self._unstick_phase >= 0:
             self._unstick_timer += dt
-            if self._unstick_timer >= self._UNSTICK_PHASE_DURATION:
-                self._unstick_phase ^= 1  # toggle between 0 (jump) and 1 (crouch)
-                self._unstick_timer = 0.0
-                if self._unstick_phase == 0:
-                    self._fire_jump = True  # one-shot jump each time we re-enter phase 0
+            if self._unstick_phase == 0:
+                # Jump phase: advance to crouch only after the bot has landed
+                # AND the minimum phase duration has elapsed.  This prevents
+                # crouching while still airborne from the jump.
+                wo = self.connection.world_object
+                landed = wo is not None and not wo.airborne
+                if self._unstick_timer >= self._UNSTICK_PHASE_DURATION and landed:
+                    self._unstick_phase = 1
+                    self._unstick_timer = 0.0
+            else:
+                # Crouch phase: purely time-based
+                if self._unstick_timer >= self._UNSTICK_PHASE_DURATION:
+                    self._unstick_phase = 0
+                    self._unstick_timer = 0.0
+                    self._fire_jump = True  # one-shot jump on re-entry
 
             # Consume the pending jump flag exactly once
             jump = self._fire_jump
