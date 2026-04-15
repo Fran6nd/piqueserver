@@ -132,8 +132,7 @@ class GuardBot(Bot):
         # Only consider enemies we can actually see
         visible = [e for e in self.get_enemies() if self.can_see(e)]
         if not visible:
-            self.set_walk()  # no visible target — hold position
-            self._reset_stuck()
+            self._roam(dt)
             return
 
         target = self.closest(visible)
@@ -225,6 +224,22 @@ class GuardBot(Bot):
             crouch = self._unstick_phase == 1
 
         self.set_walk(up=True, sprint=True, jump=jump, crouch=crouch)
+
+    def _roam(self, dt: float) -> None:
+        """Walk toward the enemy tent when there is nothing to shoot."""
+        conn = self.connection
+        enemy_base = getattr(getattr(conn.team, 'other', None), 'base', None)
+        if enemy_base is None:
+            self.set_walk()
+            self._reset_stuck()
+            return
+        dest = (enemy_base.x, enemy_base.y, enemy_base.z)
+        if self.distance_to(dest) < 3.0:
+            # Arrived — hold position at the tent
+            self.set_walk()
+            self._reset_stuck()
+            return
+        self._walk_toward(dest, dt)
 
     def _reset_stuck(self) -> None:
         """Clear all stuck-detection state (call when stopping or on respawn)."""
