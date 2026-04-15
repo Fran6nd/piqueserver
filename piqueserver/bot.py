@@ -167,7 +167,7 @@ class Bot:
 
     connection: BotConnection
     protocol: object  # ServerProtocol at runtime
-    _walk_state: Optional[tuple]  # last InputData state sent to clients
+    _walk_state: Optional[tuple] = None  # last InputData state sent to clients
 
     # ------------------------------------------------------------------
     # Factory
