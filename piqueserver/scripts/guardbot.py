@@ -197,6 +197,7 @@ class GuardBot(Bot):
                     if self._unstick_phase < 0:
                         self._unstick_phase = 0
                         self._unstick_timer = 0.0
+                        self._fire_jump = True  # one-shot jump on entry
                 else:
                     # Moving freely — clear unstick state
                     self._unstick_phase = -1
@@ -212,7 +213,12 @@ class GuardBot(Bot):
             if self._unstick_timer >= self._UNSTICK_PHASE_DURATION:
                 self._unstick_phase ^= 1  # toggle between 0 (jump) and 1 (crouch)
                 self._unstick_timer = 0.0
-            jump = self._unstick_phase == 0
+                if self._unstick_phase == 0:
+                    self._fire_jump = True  # one-shot jump each time we re-enter phase 0
+
+            # Consume the pending jump flag exactly once
+            jump = self._fire_jump
+            self._fire_jump = False
             crouch = self._unstick_phase == 1
 
         self.set_walk(up=True, sprint=True, jump=jump, crouch=crouch)
@@ -223,6 +229,7 @@ class GuardBot(Bot):
         self._pos_at_check = None
         self._unstick_phase: int = -1   # -1 = not stuck; 0 = jump; 1 = crouch
         self._unstick_timer: float = 0.0
+        self._fire_jump: bool = False   # True means one jump will fire next tick
 
     def _grenade_velocity_toward(
         self, target
