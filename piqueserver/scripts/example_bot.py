@@ -42,7 +42,8 @@ from piqueserver.bot import Bot, BotManagerMixin
 from piqueserver.commands import command
 from piqueserver.config import config
 
-from pyspades.constants import RIFLE_WEAPON, SMG_WEAPON, SHOTGUN_WEAPON
+from pyspades import contained as loaders
+from pyspades.constants import RIFLE_WEAPON, SMG_WEAPON, SHOTGUN_WEAPON, SPADE_DESTROY
 
 # ---------------------------------------------------------------------------
 # Config
@@ -215,6 +216,7 @@ class GuardBot(Bot):
     _unstick_jump_tried: bool
     _unstick_jump_grace: float
     _unstick_crouch_remaining: float
+    _unstick_crouch_tried: bool
 
     def __init_bot__(self) -> None:
         self.shoot_range = float(_shoot_range_opt.get())
@@ -229,6 +231,7 @@ class GuardBot(Bot):
         self._unstick_jump_tried = False
         self._unstick_jump_grace = 0.0
         self._unstick_crouch_remaining = 0.0
+        self._unstick_crouch_tried = False
 
     # ------------------------------------------------------------------
     # AI tick
@@ -259,9 +262,13 @@ class GuardBot(Bot):
         if next_state is not self._state:
             self._state = next_state
             self._state.enter()
-            # Reset stuck tracker on every state transition so the new state
-            # gets a clean baseline position for its first interval check.
+            # Reset all stuck/unstick state on every state transition so the
+            # new state gets a clean baseline.
             self._stuck_timer = 0.0
+            self._unstick_jump_tried = False
+            self._unstick_jump_grace = 0.0
+            self._unstick_crouch_remaining = 0.0
+            self._unstick_crouch_tried = False
             pos = self.position
             if pos is not None:
                 self._pos_at_check = pos
@@ -279,16 +286,18 @@ class GuardBot(Bot):
         every ``_STUCK_CHECK_INTERVAL`` seconds.  If the bot moved less than
         ``_STUCK_THRESHOLD`` blocks horizontally it is considered stuck.
 
-        Recovery is two-stage:
+        Recovery is three-stage:
 
-        1. **Jump** — if the block directly above (z − 1 in AoS z-down coords)
-           is clear, return ``jump=True`` for one tick.  This uses the physics
-           engine to hop over small ledges.
-        2. **Crouch** — if the jump attempt did not produce progress on the
-           next check, *or* if the block above is solid (jump is impossible),
-           set ``_unstick_crouch_remaining`` and return ``crouch=True`` for
-           ``_UNSTICK_CROUCH_DURATION`` seconds.  The reduced hitbox lets the
-           bot slide under low ceilings or through tight gaps.
+        1. **Jump** — issue a physics jump (+ 2-block nudge for 2-block walls).
+           A grace window prevents false "still stuck" readings mid-arc.
+        2. **Crouch** — if the jump produced no progress, hold crouch for
+           ``_UNSTICK_CROUCH_DURATION`` seconds so the reduced hitbox can slide
+           under low ceilings or through tight gaps.
+        3. **Dig** — if crouching also failed, destroy 3 blocks straight ahead
+           with a spade right-click (``SPADE_DESTROY``) and stay crouched.
+
+        In water ``on_ground`` is False so stages 2 and 3 are skipped; the bot
+        keeps retrying the jump to swim upward instead.
 
         Between interval checks the method returns whichever flags are
         currently active so the movement state always gets a consistent value.
@@ -316,10 +325,12 @@ class GuardBot(Bot):
         self._pos_at_check = pos
 
         if moved >= self._STUCK_THRESHOLD:
-            # Making progress — clear jump state, let crouch countdown finish.
+            # Making progress — clear all unstick state.
             self._unstick_jump_tried = False
             self._unstick_jump_grace = 0.0
-            return (False, self._unstick_crouch_remaining > 0.0)
+            self._unstick_crouch_remaining = 0.0
+            self._unstick_crouch_tried = False
+            return (False, False)
 
         # Stuck.  Decide which recovery action to take.
         if self.connection.world_object is None:
@@ -329,16 +340,17 @@ class GuardBot(Bot):
         # before deciding it failed.  The grace window covers the arc of the jump
         # so that a successful hop over a ledge is not misread as "still stuck".
         if self._unstick_jump_grace > 0.0:
-            return (False, self._unstick_crouch_remaining > 0.0)
+            return (False, False)
+
+        # If the crouch phase is still running, don't start a new action yet.
+        if self._unstick_crouch_remaining > 0.0:
+            return (False, True)
 
         ix, iy, iz = int(bx), int(by), int(bz)
         map_ = self.protocol.map
 
-        # Walking auto-steps 1-block walls, so reaching the stuck threshold
-        # always means a 2-block obstacle.  We need 2 clear blocks above to
-        # hop over it: iz-1 (just above head) and iz-2 (the landing space).
+        # Space directly above the bot's head — must be clear to jump at all.
         above1_clear = not map_.get_solid(ix, iy, iz - 1)
-        above2_clear = above1_clear and not map_.get_solid(ix, iy, iz - 2)
 
         # "On ground" means there is solid terrain within 2-3 blocks below.
         # iz+1 sits inside the player body in AoS z-down coords; iz+2/iz+3
@@ -346,18 +358,28 @@ class GuardBot(Bot):
         on_ground = map_.get_solid(ix, iy, iz + 2) or map_.get_solid(ix, iy, iz + 3)
 
         wo = self.connection.world_object
+        if self._unstick_crouch_tried:
+            # Stage 3: jump and crouch both failed — dig straight ahead.
+            self._unstick_crouch_tried = False
+            self._unstick_jump_tried = False
+            self._dig_forward(bx, by, iz, map_)
+            return (False, True)  # stay crouched while digging
+
         if above1_clear and not self._unstick_jump_tried:
             self._unstick_jump_tried = True
             self._unstick_jump_grace = self._UNSTICK_JUMP_GRACE
             if wo is not None:
-                if above2_clear:
-                    # 2-block wall: jump + 2-block nudge (AoS jump alone only
-                    # reaches ~1.35 blocks, not enough to clear).
-                    wo.set_position(bx, by, bz - 2.0)
-                else:
-                    # 1-block wall: pure physics jump, no nudge needed.
-                    # AoS jump height is enough to clear a single block.
-                    pass
+                # Check the wall height in front: if the block at head level
+                # (iz-1) in the forward direction is solid it is a 2-block wall
+                # and needs a position nudge — a bare AoS jump only reaches
+                # ~1.35 blocks.  A 1-block wall only needs a pure physics jump.
+                ox, oy, _ = wo.orientation.get()
+                h_len = math.sqrt(ox * ox + oy * oy)
+                if h_len > 0.001:
+                    fx = int(bx + ox / h_len)
+                    fy = int(by + oy / h_len)
+                    if map_.get_solid(fx, fy, iz - 1):
+                        wo.set_position(bx, by, bz - 2.0)
             return (True, False)
 
         if not on_ground:
@@ -369,8 +391,44 @@ class GuardBot(Bot):
         # Stage 2: grace expired, on solid ground, jump didn't help — crouch
         # to reduce hitbox and slide under the obstacle.
         self._unstick_jump_tried = False
+        self._unstick_crouch_tried = True
         self._unstick_crouch_remaining = self._UNSTICK_CROUCH_DURATION
         return (False, True)
+
+    def _dig_forward(self, bx: float, by: float, iz: int, map_) -> None:
+        """
+        Destroy 3 blocks straight ahead using a spade right-click
+        (``SPADE_DESTROY``): the block at the bot's level plus the ones
+        directly above and below it.
+        """
+        wo = self.connection.world_object
+        if wo is None:
+            return
+        ox, oy, _ = wo.orientation.get()
+        h = math.sqrt(ox * ox + oy * oy)
+        if h < 0.001:
+            return
+        fx = int(bx + ox / h)
+        fy = int(by + oy / h)
+
+        conn = self.connection
+        any_destroyed = False
+        for fz in (iz, iz + 1, iz - 1):    # centre, below, above
+            if 0 <= fz < 64 and map_.get_solid(fx, fy, fz):
+                count = map_.destroy_point(fx, fy, fz)
+                if count:
+                    conn.total_blocks_removed += count
+                    any_destroyed = True
+
+        if any_destroyed:
+            block_action = loaders.BlockAction()
+            block_action.x = fx
+            block_action.y = fy
+            block_action.z = iz
+            block_action.value = SPADE_DESTROY
+            block_action.player_id = conn.player_id
+            self.protocol.broadcast_contained(block_action, save=True)
+            self.protocol.update_entities()
 
     # ------------------------------------------------------------------
     # Helpers
