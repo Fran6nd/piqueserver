@@ -369,17 +369,21 @@ class GuardBot(Bot):
             self._unstick_jump_tried = True
             self._unstick_jump_grace = self._UNSTICK_JUMP_GRACE
             if wo is not None:
-                # Check the wall height in front: if the block at head level
-                # (iz-1) in the forward direction is solid it is a 2-block wall
-                # and needs a position nudge — a bare AoS jump only reaches
-                # ~1.35 blocks.  A 1-block wall only needs a pure physics jump.
-                ox, oy, _ = wo.orientation.get()
-                h_len = math.sqrt(ox * ox + oy * oy)
-                if h_len > 0.001:
-                    fx = int(bx + ox / h_len)
-                    fy = int(by + oy / h_len)
-                    if map_.get_solid(fx, fy, iz - 1):
-                        wo.set_position(bx, by, bz - 2.0)
+                if not on_ground:
+                    # In water: nothing solid in front to measure, so always
+                    # nudge 2 blocks upward to pull the bot toward the surface.
+                    wo.set_position(bx, by, bz - 2.0)
+                else:
+                    # On land: check the wall height in front.  The block at
+                    # head level (iz-1) being solid means a 2-block wall that
+                    # needs a nudge; a 1-block wall only needs a physics jump.
+                    ox, oy, _ = wo.orientation.get()
+                    h_len = math.sqrt(ox * ox + oy * oy)
+                    if h_len > 0.001:
+                        fx = int(bx + ox / h_len)
+                        fy = int(by + oy / h_len)
+                        if map_.get_solid(fx, fy, iz - 1):
+                            wo.set_position(bx, by, bz - 2.0)
             return (True, False)
 
         if not on_ground:
