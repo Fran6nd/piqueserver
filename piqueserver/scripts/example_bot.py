@@ -370,8 +370,10 @@ class GuardBot(Bot):
             self._unstick_jump_grace = self._UNSTICK_JUMP_GRACE
             if wo is not None:
                 if not on_ground:
-                    # In water: always nudge 2 blocks upward.
+                    # In water: nudge 2 blocks upward and zero the downward
+                    # velocity so physics doesn't partially cancel the lift.
                     wo.set_position(bx, by, bz - 2.0)
+                    wo.velocity.z = 0.0
                 else:
                     # On land: check the wall height in front.  The block at
                     # head level (iz-1) being solid means a 2-block wall that
