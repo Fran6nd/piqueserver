@@ -199,7 +199,7 @@ class GuardBot(Bot):
     _STUCK_CHECK_INTERVAL: float = 0.5   # seconds between position checks
     _STUCK_THRESHOLD: float = 0.8        # min blocks moved to be un-stuck
     _UNSTICK_JUMP_GRACE: float = 1.0     # seconds to wait after a jump before escalating to crouch
-    _UNSTICK_CROUCH_DURATION: float = 1.5  # seconds to hold crouch after failed jump
+    _UNSTICK_CROUCH_DURATION: float = 0.4  # seconds to hold crouch after failed jump
 
     # How often to force-resend InputData so clients never miss the walk state
     _INPUT_REFRESH_INTERVAL: float = 1.0
@@ -375,16 +375,18 @@ class GuardBot(Bot):
                     wo.set_position(bx, by, bz - 2.0)
                     wo.velocity.z = 0.0
                 else:
-                    # On land: check the wall height in front.  The block at
-                    # head level (iz-1) being solid means a 2-block wall that
-                    # needs a nudge; a 1-block wall only needs a physics jump.
+                    # On land (or water floor): check the wall height ahead.
+                    # iz-1 = head level (3-block wall), iz+1 = chest level
+                    # (2-block wall or shore from water).  Either warrants a
+                    # 2-block teleport; a 1-block wall uses the physics jump.
                     ox, oy, _ = wo.orientation.get()
                     h_len = math.sqrt(ox * ox + oy * oy)
                     if h_len > 0.001:
                         fx = int(bx + ox / h_len)
                         fy = int(by + oy / h_len)
-                        if map_.get_solid(fx, fy, iz - 1):
+                        if map_.get_solid(fx, fy, iz - 1) or map_.get_solid(fx, fy, iz + 1):
                             wo.set_position(bx, by, bz - 2.0)
+                            wo.velocity.z = 0.0
             return (True, False)
 
         if not on_ground:
