@@ -370,16 +370,8 @@ class GuardBot(Bot):
             self._unstick_jump_grace = self._UNSTICK_JUMP_GRACE
             if wo is not None:
                 if not on_ground:
-                    # In water: scan upward and teleport to the highest
-                    # consecutive clear block so the bot escapes in one move
-                    # regardless of how deep the water is.
-                    steps = 0
-                    for i in range(1, 24):
-                        if map_.get_solid(ix, iy, iz - i):
-                            break
-                        steps = i
-                    if steps > 0:
-                        wo.set_position(bx, by, bz - float(steps))
+                    # In water: always nudge 2 blocks upward.
+                    wo.set_position(bx, by, bz - 2.0)
                 else:
                     # On land: check the wall height in front.  The block at
                     # head level (iz-1) being solid means a 2-block wall that
