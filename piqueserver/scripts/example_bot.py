@@ -7,7 +7,8 @@ Spawns one guard bot per team.  Each guard:
 * Stops and aims when it has line-of-sight
 * Shoots when in range and line-of-sight is clear
 * Throws a grenade when the enemy is very close
-* Recovers from being stuck by teleporting up (no jump needed)
+* Recovers from being stuck: tries to jump first, then crouches if the jump
+  failed or was blocked
 * Calls for help in chat when its HP drops below 30
 
 This script is intended as a reference for the Bot API.  Remove or adapt
@@ -110,8 +111,8 @@ class RoamState(GuardState):
 
         dest = (enemy_base.x, enemy_base.y, enemy_base.z)
         bot.look_horizontal_toward(dest)
-        bot.set_walk(up=True, sprint=True)
-        bot._try_unstick(dt)
+        jump, crouch = bot._try_unstick(dt)
+        bot.set_walk(up=True, sprint=True, jump=jump, crouch=crouch)
         return self
 
 
@@ -128,8 +129,8 @@ class PursueState(GuardState):
             return EngageState()
 
         bot.look_horizontal_toward(target)
-        bot.set_walk(up=True, sprint=True)
-        bot._try_unstick(dt)
+        jump, crouch = bot._try_unstick(dt)
+        bot.set_walk(up=True, sprint=True, jump=jump, crouch=crouch)
         return self
 
 
@@ -179,17 +180,25 @@ class GuardBot(Bot):
     -----------------
     While moving, ``_try_unstick`` checks every ``_STUCK_CHECK_INTERVAL``
     seconds whether the bot has made horizontal progress.  If it has not,
-    it teleports the bot upward:
+    it attempts a two-step recovery:
 
-    * 2 blocks of air above → teleport 2 blocks up (clears a 2-block ledge)
-    * 1 block of air above  → teleport 1 block up  (clears a 1-block ledge)
+    1. **Jump** — if the block directly above is clear, issue a one-shot jump.
+       This clears small ledges without physics hacks.
+    2. **Crouch** — if the bot is still stuck on the next check (jump didn't
+       help) *or* if jumping is blocked (solid block above), hold crouch for
+       ``_UNSTICK_CROUCH_DURATION`` seconds.  The reduced hitbox lets the bot
+       slide under low ceilings or through narrow gaps.
 
-    In AoS z=0 is the sky; z increases downward.  "Above" means z − 1.
+    ``_try_unstick`` returns ``(jump, crouch)`` booleans that the calling
+    state merges into its ``set_walk`` call so only one broadcast happens per
+    tick.
     """
 
     # Stuck-detection tunables
-    _STUCK_CHECK_INTERVAL: float = 0.5  # seconds between position checks
-    _STUCK_THRESHOLD: float = 0.8       # min blocks moved to be un-stuck
+    _STUCK_CHECK_INTERVAL: float = 0.5   # seconds between position checks
+    _STUCK_THRESHOLD: float = 0.8        # min blocks moved to be un-stuck
+    _UNSTICK_JUMP_GRACE: float = 1.0     # seconds to wait after a jump before escalating to crouch
+    _UNSTICK_CROUCH_DURATION: float = 1.5  # seconds to hold crouch after failed jump
 
     # How often to force-resend InputData so clients never miss the walk state
     _INPUT_REFRESH_INTERVAL: float = 1.0
@@ -203,6 +212,9 @@ class GuardBot(Bot):
     _stuck_timer: float
     _pos_at_check: tuple
     _input_refresh_timer: float
+    _unstick_jump_tried: bool
+    _unstick_jump_grace: float
+    _unstick_crouch_remaining: float
 
     def __init_bot__(self) -> None:
         self.shoot_range = float(_shoot_range_opt.get())
@@ -214,6 +226,9 @@ class GuardBot(Bot):
         self._stuck_timer = 0.0
         self._pos_at_check = (0.0, 0.0, 0.0)
         self._input_refresh_timer = 0.0
+        self._unstick_jump_tried = False
+        self._unstick_jump_grace = 0.0
+        self._unstick_crouch_remaining = 0.0
 
     # ------------------------------------------------------------------
     # AI tick
@@ -255,27 +270,44 @@ class GuardBot(Bot):
     # Obstacle recovery
     # ------------------------------------------------------------------
 
-    def _try_unstick(self, dt: float) -> None:
+    def _try_unstick(self, dt: float) -> tuple:
         """
-        Detect when the bot is stuck and teleport it upward to clear the obstacle.
+        Detect when stuck and return ``(jump, crouch)`` flags for the caller's
+        ``set_walk`` call.
 
         Called every tick from movement states.  Accumulates ``dt`` and checks
         every ``_STUCK_CHECK_INTERVAL`` seconds.  If the bot moved less than
-        ``_STUCK_THRESHOLD`` blocks horizontally since the last check it is
-        considered stuck and teleported upward:
+        ``_STUCK_THRESHOLD`` blocks horizontally it is considered stuck.
 
-        * 2 blocks of air above → step 2 blocks up (handles 2-block ledges)
-        * 1 block of air above  → step 1 block up  (handles 1-block ledges)
+        Recovery is two-stage:
 
-        In AoS z increases downward; z − 1 is one block toward the sky.
+        1. **Jump** — if the block directly above (z − 1 in AoS z-down coords)
+           is clear, return ``jump=True`` for one tick.  This uses the physics
+           engine to hop over small ledges.
+        2. **Crouch** — if the jump attempt did not produce progress on the
+           next check, *or* if the block above is solid (jump is impossible),
+           set ``_unstick_crouch_remaining`` and return ``crouch=True`` for
+           ``_UNSTICK_CROUCH_DURATION`` seconds.  The reduced hitbox lets the
+           bot slide under low ceilings or through tight gaps.
+
+        Between interval checks the method returns whichever flags are
+        currently active so the movement state always gets a consistent value.
         """
+        # Tick down active timers every frame.
+        if self._unstick_jump_grace > 0.0:
+            self._unstick_jump_grace = max(0.0, self._unstick_jump_grace - dt)
+        if self._unstick_crouch_remaining > 0.0:
+            self._unstick_crouch_remaining = max(
+                0.0, self._unstick_crouch_remaining - dt
+            )
+
         pos = self.position
         if pos is None:
-            return
+            return (False, self._unstick_crouch_remaining > 0.0)
 
         self._stuck_timer += dt
         if self._stuck_timer < self._STUCK_CHECK_INTERVAL:
-            return
+            return (False, self._unstick_crouch_remaining > 0.0)
         self._stuck_timer = 0.0
 
         bx, by, bz = pos
@@ -284,24 +316,61 @@ class GuardBot(Bot):
         self._pos_at_check = pos
 
         if moved >= self._STUCK_THRESHOLD:
-            return  # making progress — nothing to do
+            # Making progress — clear jump state, let crouch countdown finish.
+            self._unstick_jump_tried = False
+            self._unstick_jump_grace = 0.0
+            return (False, self._unstick_crouch_remaining > 0.0)
 
-        # Bot is stuck — try to teleport over the obstacle.
-        wo = self.connection.world_object
-        if wo is None:
-            return
+        # Stuck.  Decide which recovery action to take.
+        if self.connection.world_object is None:
+            return (False, self._unstick_crouch_remaining > 0.0)
+
+        # If a jump was just issued, give it time to produce horizontal movement
+        # before deciding it failed.  The grace window covers the arc of the jump
+        # so that a successful hop over a ledge is not misread as "still stuck".
+        if self._unstick_jump_grace > 0.0:
+            return (False, self._unstick_crouch_remaining > 0.0)
 
         ix, iy, iz = int(bx), int(by), int(bz)
         map_ = self.protocol.map
 
-        # In AoS z-down: iz-1 = one block toward sky, iz-2 = two blocks toward sky.
-        one_clear = not map_.get_solid(ix, iy, iz - 1)
-        two_clear = one_clear and not map_.get_solid(ix, iy, iz - 2)
+        # Walking auto-steps 1-block walls, so reaching the stuck threshold
+        # always means a 2-block obstacle.  We need 2 clear blocks above to
+        # hop over it: iz-1 (just above head) and iz-2 (the landing space).
+        above1_clear = not map_.get_solid(ix, iy, iz - 1)
+        above2_clear = above1_clear and not map_.get_solid(ix, iy, iz - 2)
 
-        if two_clear:
-            wo.set_position(bx, by, bz - 2.0)
-        elif one_clear:
-            wo.set_position(bx, by, bz - 1.0)
+        # "On ground" means there is solid terrain within 2-3 blocks below.
+        # iz+1 sits inside the player body in AoS z-down coords; iz+2/iz+3
+        # reliably catches the floor block regardless of exact foot position.
+        on_ground = map_.get_solid(ix, iy, iz + 2) or map_.get_solid(ix, iy, iz + 3)
+
+        wo = self.connection.world_object
+        if above1_clear and not self._unstick_jump_tried:
+            self._unstick_jump_tried = True
+            self._unstick_jump_grace = self._UNSTICK_JUMP_GRACE
+            if wo is not None:
+                if above2_clear:
+                    # 2-block wall: jump + 2-block nudge (AoS jump alone only
+                    # reaches ~1.35 blocks, not enough to clear).
+                    wo.set_position(bx, by, bz - 2.0)
+                else:
+                    # 1-block wall: pure physics jump, no nudge needed.
+                    # AoS jump height is enough to clear a single block.
+                    pass
+            return (True, False)
+
+        if not on_ground:
+            # Bot is in water or airborne — crouching would make it sink/fall.
+            # Reset so a jump is retried on the next check interval.
+            self._unstick_jump_tried = False
+            return (False, False)
+
+        # Stage 2: grace expired, on solid ground, jump didn't help — crouch
+        # to reduce hitbox and slide under the obstacle.
+        self._unstick_jump_tried = False
+        self._unstick_crouch_remaining = self._UNSTICK_CROUCH_DURATION
+        return (False, True)
 
     # ------------------------------------------------------------------
     # Helpers
