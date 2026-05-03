@@ -1265,6 +1265,28 @@ class ServerConnection(BaseConnection):
         msg.value = reason[:MAX_CHAT_SIZE]
         self.send_contained(msg)
 
+    def send_player_properties(self, target: 'ServerConnection') -> bool:
+        """Send a Player Properties packet describing ``target`` to this client.
+
+        Returns False if the client did not negotiate the extension or the
+        target is not in a state where stats are meaningful.
+        """
+        if EXTENSION_PLAYERPROPERTIES not in self.proto_extensions:
+            return False
+        if target.player_id is None or target.weapon_object is None:
+            return False
+        packet = loaders.PacketPlayerProperties()
+        packet.sub_id = PLAYERPROPERTIES_SUB_QUERY
+        packet.player_id = target.player_id
+        packet.hp = max(0, target.hp or 0)
+        packet.blocks = max(0, target.blocks)
+        packet.grenades = max(0, target.grenades)
+        packet.magazine_ammo = target.weapon_object.current_ammo
+        packet.reserve_ammo = target.weapon_object.current_stock
+        packet.score = max(0, target.kills)
+        self.send_contained(packet)
+        return True
+
     def send_chat(self, value: str, global_message: bool = False, custom_type: int = CHAT_ALL) -> None:
         if self.deaf:
             return
